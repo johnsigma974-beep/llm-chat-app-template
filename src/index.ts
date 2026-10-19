@@ -7,15 +7,19 @@
  *
  * @license MIT
  */
-import { Env, ChatMessage } from "./types";
+import { Env } from "./types";
+import { sanitizeMessages } from "./validate";
 
 // Model ID for Workers AI model
 // https://developers.cloudflare.com/workers-ai/models/
 const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fp8";
 
-// Default system prompt
-const SYSTEM_PROMPT =
-	"You are a helpful, friendly assistant. Provide concise and accurate responses.";
+function jsonError(error: string, status: number): Response {
+	return new Response(JSON.stringify({ error }), {
+		status,
+		headers: { "content-type": "application/json" },
+	});
+}
 
 export default {
 	/**
@@ -56,17 +60,21 @@ async function handleChatRequest(
 	request: Request,
 	env: Env,
 ): Promise<Response> {
+	let body: unknown;
 	try {
-		// Parse JSON request body
-		const { messages = [] } = (await request.json()) as {
-			messages: ChatMessage[];
-		};
+		body = await request.json();
+	} catch {
+		return jsonError("invalid JSON body", 400);
+	}
+	const result = sanitizeMessages(
+		(body as { messages?: unknown } | null)?.messages,
+	);
+	if (!result.ok) {
+		return jsonError(result.error, 400);
+	}
+	const messages = result.messages;
 
-		// Add system prompt if not present
-		if (!messages.some((msg) => msg.role === "system")) {
-			messages.unshift({ role: "system", content: SYSTEM_PROMPT });
-		}
-
+	try {
 		const stream = await env.AI.run(
 			MODEL_ID,
 			{

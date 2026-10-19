@@ -16,16 +16,20 @@ type ValidationResult =
 	| { ok: false; error: string };
 
 /**
- * Validates client-supplied messages: only user/assistant roles are kept
- * (client "system" messages are dropped), counts and lengths are capped,
- * only the last MAX_MESSAGES turns are kept, oversized input is rejected,
- * and the server system prompt is always prepended.
+ * Validates client-supplied messages.
+ * Client "system" messages are dropped; any other non user/assistant role is
+ * rejected. History is trimmed to the last MAX_MESSAGES user/assistant turns
+ * before length checks, so a long chat is not rejected for its length.
+ * Only the latest user message is rejected when it exceeds MAX_MESSAGE_CHARS;
+ * older messages over that limit are truncated. The server system prompt is
+ * always prepended and is the only system message.
  */
 export function sanitizeMessages(input: unknown): ValidationResult {
 	if (!Array.isArray(input)) {
 		return { ok: false, error: "messages must be an array" };
 	}
-	const cleaned: ChatMessage[] = [];
+
+	const turns: ChatMessage[] = [];
 	for (const msg of input) {
 		if (!msg || typeof msg !== "object") {
 			return { ok: false, error: "invalid message" };
@@ -38,21 +42,41 @@ export function sanitizeMessages(input: unknown): ValidationResult {
 		if (typeof content !== "string") {
 			return { ok: false, error: "content must be a string" };
 		}
-		if (content.length > MAX_MESSAGE_CHARS) {
-			return { ok: false, error: `message exceeds ${MAX_MESSAGE_CHARS} characters` };
-		}
-		cleaned.push({ role, content });
+		turns.push({ role, content });
 	}
-	if (cleaned.length === 0) {
+
+	if (turns.length === 0) {
 		return { ok: false, error: "at least one message is required" };
 	}
-	if (input.length > MAX_MESSAGES * 5) {
-		return { ok: false, error: "too many messages" };
+
+	// Trim first so earlier turns, including oversized ones, do not fail the request.
+	const recent = turns.slice(-MAX_MESSAGES);
+
+	let latestUser = -1;
+	for (let i = recent.length - 1; i >= 0; i--) {
+		if (recent[i].role === "user") {
+			latestUser = i;
+			break;
+		}
 	}
-	// Keep only the most recent turns so long chats keep working
-	const recent = cleaned.slice(-MAX_MESSAGES);
+	if (
+		latestUser >= 0 &&
+		recent[latestUser].content.length > MAX_MESSAGE_CHARS
+	) {
+		return {
+			ok: false,
+			error: `message exceeds ${MAX_MESSAGE_CHARS} characters`,
+		};
+	}
+
+	const limited = recent.map((msg) =>
+		msg.content.length > MAX_MESSAGE_CHARS
+			? { role: msg.role, content: msg.content.slice(0, MAX_MESSAGE_CHARS) }
+			: msg,
+	);
+
 	return {
 		ok: true,
-		messages: [{ role: "system", content: SYSTEM_PROMPT }, ...recent],
+		messages: [{ role: "system", content: SYSTEM_PROMPT }, ...limited],
 	};
 }

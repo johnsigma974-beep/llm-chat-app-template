@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
-import { MAX_MESSAGES, MAX_MESSAGE_CHARS, sanitizeMessages } from "../src/validate";
+import {
+	MAX_MESSAGES,
+	MAX_MESSAGE_CHARS,
+	SYSTEM_PROMPT,
+	sanitizeMessages,
+} from "../src/validate";
 
 function makeEnv() {
 	const run = vi.fn(async () => new ReadableStream());
@@ -83,5 +88,67 @@ describe("sanitizeMessages", () => {
 			expect(r.messages).toHaveLength(MAX_MESSAGES + 1);
 			expect(r.messages.at(-1)?.content).toBe(String(MAX_MESSAGES + 4));
 		}
+	});
+
+	it("truncates an earlier assistant reply over 4000 characters", async () => {
+		const longReply = "a".repeat(MAX_MESSAGE_CHARS + 80);
+		const messages = [
+			{ role: "assistant", content: longReply },
+			{ role: "user", content: "continue" },
+		];
+		const r = sanitizeMessages(messages);
+		expect(r.ok).toBe(true);
+		if (r.ok) {
+			expect(r.messages).toEqual([
+				{ role: "system", content: SYSTEM_PROMPT },
+				{ role: "assistant", content: longReply.slice(0, MAX_MESSAGE_CHARS) },
+				{ role: "user", content: "continue" },
+			]);
+		}
+
+		const { env, run } = makeEnv();
+		const res = await worker.fetch(post({ messages }), env, ctx);
+		expect(res.status).toBe(200);
+		const sent = (run.mock.calls[0] as any[])[1].messages;
+		expect(sent[1].content).toHaveLength(MAX_MESSAGE_CHARS);
+		expect(sent[1].content).toBe(longReply.slice(0, MAX_MESSAGE_CHARS));
+	});
+
+	it("trims 150 history entries to the last 20 and succeeds", async () => {
+		const many = Array.from({ length: 150 }, (_, i) => ({
+			role: i % 2 === 0 ? "user" : "assistant",
+			content: `turn-${i}`,
+		}));
+		const r = sanitizeMessages(many);
+		expect(r.ok).toBe(true);
+		if (r.ok) {
+			expect(r.messages).toHaveLength(MAX_MESSAGES + 1);
+			expect(r.messages[0]).toEqual({ role: "system", content: SYSTEM_PROMPT });
+			expect(r.messages.slice(1).map((m) => m.content)).toEqual(
+				many.slice(-MAX_MESSAGES).map((m) => m.content),
+			);
+		}
+
+		const { env, run } = makeEnv();
+		const res = await worker.fetch(post({ messages: many }), env, ctx);
+		expect(res.status).toBe(200);
+		const sent = (run.mock.calls[0] as any[])[1].messages;
+		expect(sent).toHaveLength(MAX_MESSAGES + 1);
+		expect(sent.at(-1)).toEqual({ role: "assistant", content: "turn-149" });
+	});
+
+	it("returns 400 when the latest user message exceeds 4000 characters", async () => {
+		const messages = [
+			{ role: "user", content: "earlier question" },
+			{ role: "assistant", content: "b".repeat(MAX_MESSAGE_CHARS + 10) },
+			{ role: "user", content: "z".repeat(MAX_MESSAGE_CHARS + 1) },
+		];
+		const r = sanitizeMessages(messages);
+		expect(r.ok).toBe(false);
+
+		const { env, run } = makeEnv();
+		const res = await worker.fetch(post({ messages }), env, ctx);
+		expect(res.status).toBe(400);
+		expect(run).not.toHaveBeenCalled();
 	});
 });
